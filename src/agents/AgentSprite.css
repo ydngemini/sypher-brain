@@ -1,0 +1,67 @@
+.moving-agent-sprite {
+  position: absolute;
+  font-family: 'JetBrains Mono', 'Courier New', Courier, monospace;
+  font-weight: 900;
+  font-size: 0.65rem;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  pointer-events: none;
+  white-space: nowrap;
+  transform: translate(-50%, -50%);
+  z-index: 50;
+  animation: sprite-jitter 0.15s infinite alternate;
+  will-change: left, top, transform, opacity;
+}
+
+.moving-agent-sprite::before {
+  content: '';
+  position: absolute;
+  left: -20px;
+  top: 50%;
+  width: 16px;
+  height: 1px;
+  background: currentColor;
+  opacity: 0.35;
+}
+
+.moving-agent-sprite::after {
+  content: '';
+  position: absolute;
+  right: -6px;
+  top: 50%;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.6;
+  box-shadow: 0 0 4px currentColor;
+}
+
+@keyframes sprite-jitter {
+  0% { filter: none; }
+  100% { filter: blur(0.3px); transform: translate(-50%, -51%) skewX(0.5deg); }
+}
+
+.sprite-impact-flash {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 49;
+  transform: translate(-50%, -50%);
+  animation: impact-burst 0.6s ease-out forwards;
+}
+
+@keyframes impact-burst {
+  0% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(0.5);
+    box-shadow: 0 0 20px currentColor, 0 0 40px currentColor;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(3);
+    box-shadow: 0 0 0px currentColor;
+  }
+}

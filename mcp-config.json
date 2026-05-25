@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "mcp-obsidian": {
+      "command": "uvx",
+      "args": ["mcp-obsidian"],
+      "env": {
+        "OBSIDIAN_API_KEY": "2095df5e69d9e57c46d2b3829a7205f86584ad22b7c4db354b422208e3105be4",
+        "OBSIDIAN_HOST": "127.0.0.1",
+        "OBSIDIAN_PORT": "27124"
+      }
+    },
+    "basic-memory": {
+      "command": "uvx",
+      "args": ["basic-memory", "mcp"],
+      "env": {
+        "MEMORY_DIR": "/media/ydn/SYPHER_CORE/SYPHER_VAULT"
+      }
+    }
+  }
+}

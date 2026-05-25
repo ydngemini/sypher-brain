@@ -46,6 +46,7 @@ export class BrainScene {
     this._initLabels();
     this._initRaycaster();
     this._initStreams();
+    this._initLayoutWorker();
 
     this.clock = new THREE.Clock();
     this._animate = this._animate.bind(this);
@@ -265,6 +266,43 @@ export class BrainScene {
     this.instancedStreams = new InstancedStreamSystem(this.scene);
   }
 
+  _initLayoutWorker() {
+    this.layoutWorker = new Worker(new URL('./graph-worker.js', import.meta.url));
+    this._workerBusy = false;
+
+    this.layoutWorker.onmessage = (e) => {
+      this._workerBusy = false;
+
+      if (e.data.type === 'GRAVITY_COMPUTED' || e.data.type === 'REPULSION_COMPUTED') {
+        const updated = e.data.updatedNodes;
+        for (let i = 0; i < updated.length && i < this.nodes.length; i++) {
+          this.nodes[i].position = updated[i].position;
+          this.nodes[i].glow = updated[i].glow;
+        }
+        this._rebuildParticlesFromNodes();
+      }
+    };
+  }
+
+  _rebuildParticlesFromNodes() {
+    const particles = [...this.ambientParticles];
+
+    for (const node of this.nodes) {
+      const rgb = hexToRGB(node.hexColor);
+      particles.push({
+        x: node.position[0],
+        y: node.position[1],
+        z: node.position[2],
+        r: rgb.r, g: rgb.g, b: rgb.b,
+        glow: node.glow,
+        size: 0.8 + node.glow * 1.2,
+      });
+    }
+
+    this.particleSystem.setParticles(particles);
+    this.synapseNetwork.setEdges(this.edges);
+  }
+
   injectFeed(feedData) {
     const targetPos = this.synapticStream.getSectorPosition(feedData.targetSector);
     const camera = this.camera;
@@ -283,56 +321,40 @@ export class BrainScene {
       originPosition: [startPos.x, startPos.y, startPos.z],
     });
 
-    // Bi-directional attraction: pull linked nodes closer when associations arrive
+    // Offload gravitational pull to Web Worker (keeps render thread at 60fps)
     if (feedData.synapticAssociations && feedData.synapticAssociations.length > 0) {
-      this._applyGravitationalPull(feedData.synapticAssociations, targetPos);
+      this._dispatchGravityToWorker(feedData.synapticAssociations, targetPos);
     }
   }
 
-  _applyGravitationalPull(associations, attractorPos) {
+  _dispatchGravityToWorker(associations, attractorPos) {
+    if (this._workerBusy || this.nodes.length === 0) return;
+    this._workerBusy = true;
+
+    // Add new edges for the associations before dispatching
     for (const assoc of associations) {
-      const sourceNode = this.nodes.find(n =>
+      const src = this.nodes.find(n =>
         n.label.toLowerCase().includes(assoc.sourceNode?.toLowerCase())
       );
-      const targetNode = this.nodes.find(n =>
+      const tgt = this.nodes.find(n =>
         n.label.toLowerCase().includes(assoc.targetNode?.toLowerCase())
       );
-
-      if (sourceNode && targetNode) {
-        const pullStrength = assoc.weight * 0.15;
-        const dx = targetNode.position[0] - sourceNode.position[0];
-        const dy = targetNode.position[1] - sourceNode.position[1];
-        const dz = targetNode.position[2] - sourceNode.position[2];
-
-        sourceNode.position[0] += dx * pullStrength;
-        sourceNode.position[1] += dy * pullStrength;
-        sourceNode.position[2] += dz * pullStrength;
-
-        // Boost glow on both nodes
-        sourceNode.glow = Math.min(sourceNode.glow + 0.3, 1.0);
-        targetNode.glow = Math.min(targetNode.glow + 0.3, 1.0);
-
-        // Add a synapse between them
+      if (src && tgt) {
         this.edges.push({
-          from: sourceNode.position,
-          to: targetNode.position,
+          from: src.position,
+          to: tgt.position,
           activity: assoc.weight * 0.6,
         });
-      } else if (sourceNode) {
-        // Pull source toward the attractor sector
-        const pullStrength = assoc.weight * 0.08;
-        sourceNode.position[0] += (attractorPos.x - sourceNode.position[0]) * pullStrength;
-        sourceNode.position[1] += (attractorPos.y - sourceNode.position[1]) * pullStrength;
-        sourceNode.position[2] += (attractorPos.z - sourceNode.position[2]) * pullStrength;
-        sourceNode.glow = Math.min(sourceNode.glow + 0.2, 1.0);
       }
     }
+    this.edgeCount = this.edges.length;
 
-    // Rebuild the visual state after pull
-    if (associations.length > 0 && this.nodes.length > 0) {
-      this.edgeCount = this.edges.length;
-      this.synapseNetwork.setEdges(this.edges);
-    }
+    this.layoutWorker.postMessage({
+      type: 'COMPUTE_GRAVITY_PULL',
+      nodes: this.nodes.map(n => ({ label: n.label, position: [...n.position], glow: n.glow })),
+      associations,
+      attractorPos: [attractorPos.x, attractorPos.y, attractorPos.z],
+    });
   }
 
   _checkHover() {

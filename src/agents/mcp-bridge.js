@@ -1,13 +1,12 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { readFile, readdir, stat } from 'fs/promises';
-import { join, basename, extname } from 'path';
+import { readFile } from 'fs/promises';
+import { join, basename } from 'path';
+import chokidar from 'chokidar';
 
 const VAULT_PATH = process.env.VAULT_PATH || '/media/ydn/SYPHER_CORE/SYPHER_VAULT';
-const OBSIDIAN_API = `http://${process.env.OBSIDIAN_HOST || '127.0.0.1'}:${process.env.OBSIDIAN_PORT || '27124'}`;
 const OBSIDIAN_API_KEY = process.env.OBSIDIAN_API_KEY || '';
 const BROKER_URL = 'http://127.0.0.1:9800/api/feed';
-const POLL_INTERVAL = 4000;
 
 const WIKILINK_RE = /\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g;
 
@@ -15,16 +14,16 @@ export class MCPBrainBridge {
   constructor() {
     this.mcpClient = null;
     this.mcpAvailable = false;
-    this.knownFiles = new Map();
-    this.lastScan = 0;
+    this.watcher = null;
   }
 
   async init() {
     await this._tryMCPConnect();
-    this._startPolling();
+    this._initKernelWatcher();
     console.log('[mcp-bridge] SYPHER Brain MCP Bridge initialized');
     console.log(`[mcp-bridge] Vault: ${VAULT_PATH}`);
     console.log(`[mcp-bridge] MCP: ${this.mcpAvailable ? 'connected' : 'direct file mode'}`);
+    console.log('[mcp-bridge] Watcher: inotify kernel events (chokidar)');
   }
 
   async _tryMCPConnect() {
@@ -38,12 +37,8 @@ export class MCPBrainBridge {
       const transport = new StdioClientTransport({
         command: 'uvx',
         args: ['mcp-obsidian'],
-        env: {
-          ...process.env,
-          OBSIDIAN_API_KEY,
-        },
+        env: { ...process.env, OBSIDIAN_API_KEY },
       });
-
       this.mcpClient = new Client({ name: 'SypherBrainBridge', version: '4.0.0' });
       await this.mcpClient.connect(transport);
       this.mcpAvailable = true;
@@ -54,48 +49,45 @@ export class MCPBrainBridge {
     }
   }
 
-  _startPolling() {
-    this._scanVault();
-    setInterval(() => this._scanVault(), POLL_INTERVAL);
+  _initKernelWatcher() {
+    const targetDirs = ['00_Cortex', '10_Active_Builds', '20_Knowledge_Graph', '30_Concepts'];
+    const watchPaths = targetDirs.map(d => join(VAULT_PATH, d));
+
+    this.watcher = chokidar.watch(watchPaths, {
+      ignored: /(^|[\/\\])\../,
+      persistent: true,
+      ignoreInitial: true,
+      awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 100 },
+    });
+
+    this.watcher.on('change', (filePath) => this._onFileEvent(filePath, 'change'));
+    this.watcher.on('add', (filePath) => this._onFileEvent(filePath, 'add'));
+
+    this.watcher.on('ready', () => {
+      console.log('[mcp-bridge] Kernel watcher ready — monitoring vault directories');
+    });
+
+    this.watcher.on('error', (err) => {
+      console.error(`[mcp-bridge] Watcher error: ${err.message}`);
+    });
   }
 
-  async _scanVault() {
-    try {
-      const dirs = ['00_Cortex', '10_Active_Builds', '20_Knowledge_Graph', '30_Concepts'];
-      let mutations = [];
+  _onFileEvent(filePath, eventType) {
+    if (!filePath.endsWith('.md')) return;
 
-      for (const dir of dirs) {
-        const dirPath = join(VAULT_PATH, dir);
-        try {
-          const files = await readdir(dirPath);
-          for (const file of files) {
-            if (extname(file) !== '.md') continue;
-            const fullPath = join(dirPath, file);
-            const info = await stat(fullPath);
-            const mtimeMs = info.mtimeMs;
-            const prevMtime = this.knownFiles.get(fullPath);
+    const relative = filePath.slice(VAULT_PATH.length + 1);
+    const parts = relative.split('/');
+    const dir = parts[0];
+    const file = parts[parts.length - 1];
 
-            if (!prevMtime) {
-              this.knownFiles.set(fullPath, mtimeMs);
-            } else if (mtimeMs > prevMtime) {
-              this.knownFiles.set(fullPath, mtimeMs);
-              mutations.push({ path: fullPath, file, dir, mtime: mtimeMs });
-            }
-          }
-        } catch {}
-      }
-
-      for (const mutation of mutations) {
-        await this._handleMutation(mutation);
-      }
-    } catch {}
+    this._handleMutation({ path: filePath, file, dir, eventType });
   }
 
   async _handleMutation(mutation) {
     const { path, file, dir } = mutation;
     const noteId = basename(file, '.md');
-
     let content = '';
+
     if (this.mcpAvailable) {
       try {
         const result = await this.mcpClient.callTool({
@@ -117,7 +109,7 @@ export class MCPBrainBridge {
     const mass = Math.min(content.length * 0.008, 12.0);
     const intensity = Math.min(0.4 + links.length * 0.1, 1.0);
 
-    const feed = {
+    await this._postFeed({
       agentId: 'VAULT_OBSERVER',
       targetSector: sector,
       intensity,
@@ -127,22 +119,18 @@ export class MCPBrainBridge {
         weight: 0.7 + Math.random() * 0.3,
       })),
       payloadSummary: `vault:${noteId} (${links.length} links, ${content.length}b)`,
-    };
+    });
 
-    await this._postFeed(feed);
-
-    // Emit specialized MCP_NODE_MUTATION for the instanced engine
     await this._postFeed({
       agentId: 'VAULT_MUTATOR',
       targetSector: sector,
       intensity: 0.9,
       synapticAssociations: [],
       payloadSummary: `mutation:${noteId} mass=${mass.toFixed(1)}`,
-      vectorTarget: null,
       _mcpMeta: { nodeId: noteId, mass, links },
     });
 
-    console.log(`[mcp-bridge] Mutation: ${noteId} → ${sector} (${links.length} links)`);
+    console.log(`[mcp-bridge] ${mutation.eventType}: ${noteId} → ${sector} (${links.length} links)`);
   }
 
   _extractWikilinks(content) {
@@ -157,16 +145,13 @@ export class MCPBrainBridge {
   _classifySector(dir, content) {
     if (dir === '00_Cortex') return 'PREFRONTAL';
     if (dir === '10_Active_Builds') return 'CEREBELLUM';
-    if (dir === '20_Knowledge_Graph') return 'CONCEPT_LAYER';
-    if (dir === '30_Concepts') return 'CONCEPT_LAYER';
-
+    if (dir === '20_Knowledge_Graph' || dir === '30_Concepts') return 'CONCEPT_LAYER';
     if (content.includes('[[Decision') || content.includes('## Decision'))
       return 'PREFRONTAL';
     if (content.includes('[[Architecture') || content.includes('## Stack'))
       return 'CONTEXT_CORTEX';
     if (content.includes('[[Session') || content.includes('## Log'))
       return 'HIPPOCAMPUS';
-
     return 'TEMPORAL';
   }
 
@@ -184,7 +169,6 @@ export class MCPBrainBridge {
   }
 }
 
-// Standalone execution
 if (process.argv[1] && process.argv[1].includes('mcp-bridge')) {
   const bridge = new MCPBrainBridge();
   bridge.init();

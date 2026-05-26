@@ -80,6 +80,7 @@ fi
 
 supervise agent-mind     node "$DIR/src/agents/agent-mind.js"
 supervise vault-writer   node "$DIR/src/agents/vault-writer.js"
+supervise transcript-watcher node "$DIR/src/agents/transcript-watcher.js"
 
 cleanup() {
     echo ""

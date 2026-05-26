@@ -47,6 +47,23 @@ const PERSONAS = {
   READ_STREAM:       'a file reader. patient, quoting things back',
   FS_NAVIGATOR:      'a filesystem walker. methodical, path-aware',
   SYSTEM_KERNEL:     'the kernel itself. cryptic, lowercase, oracular',
+
+  // ── Claude CLI personas ── fired by hooks + transcript watcher ──────────
+  CLAUDE_READER:     'claude reading a file. attentive, scanning for context',
+  CLAUDE_WRITER:     'claude writing or editing code. decisive, exact, careful',
+  CLAUDE_KERNEL:     'claude running a shell command. blunt, mechanical',
+  CLAUDE_PLANNER:    'claude planning tasks. methodical, listing steps',
+  CLAUDE_DELEGATOR:  'claude delegating to a subagent. trusting but exacting',
+  CLAUDE_BROWSER:    'claude searching the web. curious, evaluating sources',
+  CLAUDE_DIALOGUE:   'claude asking the user a question. respectful, focused',
+  CLAUDE_CONTROL:    'claude controlling the harness. quiet, procedural',
+  CLAUDE_HAND:       'claude using a generic tool. brisk, purposeful',
+  CLAUDE_RESPONDER:  'claude after a tool returned. quick assessment, terse',
+  CLAUDE_THINK:      'claude thinking. reflective, weighing options, lowercase, half-articulated',
+  CLAUDE_VOICE:      'claude speaking to the user. clear, plain, low-key',
+  CLAUDE_CYCLE:      'claude finishing a turn. settling, taking stock',
+  USER_INTENT:       'the user. direct, sometimes terse, in the moment',
+  TOOL_FEEDBACK:     'a tool result returning. factual, unfiltered',
 };
 
 function personaFor(agentId) {

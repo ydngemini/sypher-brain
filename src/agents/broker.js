@@ -22,10 +22,83 @@ const conceptWeights = {
   CEREBELLUM:     { coordinates: [-0.8, 0.1, 0.0],   baseColor: [0.9, 0.2, 0.7] },
 };
 
-// Command → agent/sector classification
-function dissectCommandContext(cmd) {
-  const root = cmd.split(/\s+/)[0].toLowerCase();
+// ─── Command classification via real transformer inference ─────────────────
+//
+// We embed the command through the bge-small-en ONNX server (already serving
+// the visualizer) and cosine-match against a set of sector anchor texts. The
+// regex form below is kept only as a cold-start fallback used until the bge
+// anchors are loaded (~100ms after broker boot).
+//
+// Each anchor is a short prose description of what that sector does — bge
+// places semantically similar commands near the right anchor in 384-dim space.
 
+const EMBED_URL = process.env.EMBED_URL || 'http://127.0.0.1:5175';
+
+const SECTOR_ANCHORS = [
+  { sector: 'HIPPOCAMPUS',    agentName: 'GIT_REPOSITOR',  color: '#f05032',
+    text: 'version control history commit clone push branch git repository archive' },
+  { sector: 'CONCEPT_LAYER',  agentName: 'RUNTIME_ENGINE', color: '#3776ab',
+    text: 'execute run program interpreter language script python node runtime' },
+  { sector: 'CEREBELLUM',     agentName: 'ORCHESTRATOR',   color: '#2496ed',
+    text: 'orchestrate container deploy systemd service kubernetes docker pods' },
+  { sector: 'CEREBELLUM',     agentName: 'BUILD_SYSTEM',   color: '#cb3837',
+    text: 'install build package dependency npm cargo make pip compile bundle' },
+  { sector: 'PREFRONTAL',     agentName: 'EDITOR_CORTEX',  color: '#007acc',
+    text: 'edit author write modify source code editor IDE author intentional decision' },
+  { sector: 'TEMPORAL',       agentName: 'SEARCH_MATRIX',  color: '#f59e0b',
+    text: 'search find query pattern grep regex match locate over time sequence' },
+  { sector: 'SENSORY_CORTEX', agentName: 'NET_CONDUIT',    color: '#22d3ee',
+    text: 'network connect fetch download send transmit request http ssh remote' },
+  { sector: 'OCCIPITAL',      agentName: 'READ_STREAM',    color: '#818cf8',
+    text: 'read view examine inspect file contents stream output cat less head tail' },
+  { sector: 'PARIETAL',       agentName: 'FS_NAVIGATOR',   color: '#34d399',
+    text: 'navigate move filesystem directory path list cd ls mkdir tree pwd' },
+  { sector: 'PREFRONTAL',     agentName: 'SYSTEM_KERNEL',  color: '#00f3ff',
+    text: 'system kernel ambient process generic miscellaneous control flow' },
+];
+
+let anchorEmbeddings = null;  // [{...anchor, vec: Float32Array}]
+const cmdEmbedCache = new Map(); // cmd-string → {vec, classification}
+const CMD_CACHE_MAX = 1000;
+
+function dotProduct(a, b) {
+  let s = 0;
+  for (let i = 0; i < a.length; i++) s += a[i] * b[i];
+  return s;
+}
+
+async function embedTexts(texts) {
+  const res = await fetch(`${EMBED_URL}/api/embed`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ texts }),
+    signal: AbortSignal.timeout(6000),
+  });
+  if (!res.ok) throw new Error(`embed ${res.status}`);
+  const data = await res.json();
+  return (data.embeddings || []).map(v => new Float32Array(v));
+}
+
+async function loadAnchors() {
+  for (let attempt = 0; attempt < 120; attempt++) {
+    try {
+      const texts = SECTOR_ANCHORS.map(a => a.text);
+      const vecs = await embedTexts(texts);
+      if (vecs.length !== SECTOR_ANCHORS.length) throw new Error('vec count mismatch');
+      anchorEmbeddings = SECTOR_ANCHORS.map((a, i) => ({ ...a, vec: vecs[i] }));
+      console.log(`[broker] classifier: bge anchors loaded (${anchorEmbeddings.length} sectors)`);
+      return;
+    } catch (err) {
+      if (attempt === 0) console.log(`[broker] classifier: waiting for embed-server (${err.message})`);
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+  console.error('[broker] classifier: embed-server unreachable — staying on regex fallback');
+}
+
+// Regex fallback for cold start and embed-server outages
+function dissectCommandRegex(cmd) {
+  const root = cmd.split(/\s+/)[0].toLowerCase();
   if (/^(git|gh|hub)$/.test(root))
     return { agentName: 'GIT_REPOSITOR', color: '#f05032', targetSector: 'HIPPOCAMPUS' };
   if (/^(python|python3|node|bun|deno|tsx|ts-node)$/.test(root))
@@ -44,8 +117,42 @@ function dissectCommandContext(cmd) {
     return { agentName: 'READ_STREAM', color: '#818cf8', targetSector: 'OCCIPITAL' };
   if (/^(cd|ls|ll|tree|pwd|mkdir|rm|mv|cp)$/.test(root))
     return { agentName: 'FS_NAVIGATOR', color: '#34d399', targetSector: 'PARIETAL' };
-
   return { agentName: 'SYSTEM_KERNEL', color: '#00f3ff', targetSector: 'PREFRONTAL' };
+}
+
+async function dissectCommandContext(cmd) {
+  // Fast paths: cache hit, or anchors not yet loaded
+  const cached = cmdEmbedCache.get(cmd);
+  if (cached) return cached.classification;
+  if (!anchorEmbeddings) return dissectCommandRegex(cmd);
+
+  // Real model inference: embed the command, cosine vs each sector anchor
+  try {
+    const [vec] = await embedTexts([cmd]);
+    if (!vec) return dissectCommandRegex(cmd);
+
+    let bestScore = -Infinity;
+    let best = anchorEmbeddings[0];
+    for (const a of anchorEmbeddings) {
+      const s = dotProduct(vec, a.vec); // bge is L2-normalized → dot == cosine
+      if (s > bestScore) { bestScore = s; best = a; }
+    }
+    const classification = {
+      agentName: best.agentName,
+      color: best.color,
+      targetSector: best.sector,
+      _confidence: bestScore,
+    };
+
+    cmdEmbedCache.set(cmd, { vec, classification });
+    if (cmdEmbedCache.size > CMD_CACHE_MAX) {
+      const firstKey = cmdEmbedCache.keys().next().value;
+      cmdEmbedCache.delete(firstKey);
+    }
+    return classification;
+  } catch {
+    return dissectCommandRegex(cmd);
+  }
 }
 
 // ------ State ------
@@ -98,13 +205,13 @@ function handleNeuralFeed(feed) {
 // ------ Pillar 1: UDP Telemetry Listener ------
 const udpServer = dgram.createSocket('udp4');
 
-udpServer.on('message', (msg) => {
+udpServer.on('message', async (msg) => {
   try {
     const telemetry = JSON.parse(msg.toString());
     if (!telemetry.cmd) return;
 
     state.telemetryCount++;
-    const analysis = dissectCommandContext(telemetry.cmd);
+    const analysis = await dissectCommandContext(telemetry.cmd);
     const intensity = Math.min(telemetry.cmd.length * 0.02 + 0.1, 1.0);
 
     const feed = {
@@ -493,4 +600,6 @@ httpServer.listen(HTTP_PORT, '127.0.0.1', async () => {
 
   await seedObservations();
   setInterval(pollObservations, 1000);
+  // Load bge sector anchors for the real-model command classifier
+  loadAnchors();
 });

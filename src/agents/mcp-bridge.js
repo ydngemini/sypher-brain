@@ -10,6 +10,20 @@
 import { readFile, readdir, stat } from 'fs/promises';
 import { join, basename, relative } from 'path';
 import chokidar from 'chokidar';
+import { BgeClassifier } from './bge-classify.js';
+
+// Real-model category classification — used in place of dir-only heuristics.
+// Anchors describe each note category in plain prose; bge-small-en places
+// the note label+subtitle near the right anchor in 384-dim space.
+const NOTE_ANCHORS = [
+  { category: 'session',   text: 'session log day notes journal record of activity worked through' },
+  { category: 'project',   text: 'active build project specification stack architecture engineering effort' },
+  { category: 'concept',   text: 'concept knowledge technical term pattern theory idea reusable insight' },
+  { category: 'decision',  text: 'decision rationale architectural choice ADR meta operating manual rule' },
+  { category: 'entity',    text: 'person company tool product external named entity organisation' },
+  { category: 'discovery', text: 'raw source ingested found fact observation discovery snippet' },
+];
+const noteClassifier = new BgeClassifier(NOTE_ANCHORS);
 
 const VAULT_PATH = process.env.VAULT_PATH || '/media/ydn/SYPHER_CORE/SYPHER_VAULT';
 const BROKER_BASE = process.env.BROKER_BASE || 'http://127.0.0.1:9800';
@@ -77,9 +91,8 @@ function extractWikilinks(content) {
   return [...matches];
 }
 
-function classifyNote({ dir, frontmatter, content, dirInVault }) {
-  // Directory wins for the major vault folders — frontmatter `type: tech-spec`
-  // is too generic to use as a primary signal.
+function classifyNoteDirOnly({ dirInVault, frontmatter }) {
+  // Dir-based fallback used during cold start (before bge anchors are loaded)
   if (dirInVault === '00_Cortex') return 'session';
   if (dirInVault === '10_Active_Builds') return 'project';
   if (dirInVault === '20_Knowledge_Graph') return 'concept';
@@ -87,11 +100,17 @@ function classifyNote({ dir, frontmatter, content, dirInVault }) {
   if (dirInVault === '40_Entities') return 'entity';
   if (dirInVault === '60_Decisions') return 'decision';
   if (dirInVault === '50_Raw') return 'discovery';
-
-  const fmType = (frontmatter.type || '').toLowerCase();
+  const fmType = (frontmatter?.type || '').toLowerCase();
   if (TYPE_TO_CATEGORY[fmType]) return TYPE_TO_CATEGORY[fmType];
+  return 'decision';
+}
 
-  return 'decision'; // root-level meta files (CLAUDE, CRITICAL_FACTS, index)
+async function classifyNote({ dirInVault, frontmatter, label, subtitle }) {
+  // Try real model first; fall back to dir-based if classifier isn't ready.
+  const text = [label, subtitle, dirInVault].filter(Boolean).join(' — ');
+  const r = await noteClassifier.classify(text).catch(() => null);
+  if (r && r.category) return r.category;
+  return classifyNoteDirOnly({ dirInVault, frontmatter });
 }
 
 function noteIdFromPath(filePath) {
@@ -245,9 +264,10 @@ export class VaultBridge {
 
     const frontmatter = parseFrontmatter(content);
     const links = extractWikilinks(content);
-    const category = classifyNote({ frontmatter, content, dirInVault });
-    const sector = DIR_TO_SECTOR[dirInVault] || 'TEMPORAL';
     const label = frontmatter.title || basename(file, '.md').replace(/_/g, ' ');
+    const subtitlePreview = this._extractFirstParagraph(content);
+    const category = await classifyNote({ dirInVault, frontmatter, label, subtitle: subtitlePreview });
+    const sector = DIR_TO_SECTOR[dirInVault] || 'TEMPORAL';
     const mass = Math.min(content.length * 0.008, 12.0);
     const updated = frontmatter.updated || frontmatter.created || '';
 
@@ -264,7 +284,7 @@ export class VaultBridge {
       updated,
       mtime,
       file: rel,
-      subtitle: this._extractFirstParagraph(content),
+      subtitle: subtitlePreview,
     };
 
     this.known.set(noteId, { mtime });

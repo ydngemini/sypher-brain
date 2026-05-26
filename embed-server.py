@@ -9,10 +9,17 @@ Serves: http://localhost:5175/api/positions
 import json
 import os
 import sys
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import numpy as np
+
+# ONNX sessions are NOT thread-safe. ThreadingHTTPServer accepts connections
+# in parallel, but actual inference must be serialized behind a lock. This
+# keeps clients responsive (no socket starvation) while ensuring only one
+# session.run() executes at a time.
+_inference_lock = threading.Lock()
 
 # ONNX model path (same one SYPHER IDE uses)
 MODEL_DIR = "/media/ydn/SYPHER_CORE/YDNIDE/.sypher/models/models--qdrant--bge-small-en-v1.5-onnx-q/snapshots/52398278842ec682c6f32300af41344b1c0b0bb2"
@@ -50,14 +57,17 @@ def embed_texts(texts):
     attention_mask = np.array([e.attention_mask for e in encodings], dtype=np.int64)
     token_type_ids = np.zeros_like(input_ids, dtype=np.int64)
 
-    outputs = _session.run(
-        None,
-        {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "token_type_ids": token_type_ids
-        }
-    )
+    # Serialize the actual ONNX inference — sessions are not thread-safe and
+    # racy calls produce BrokenPipe + corrupt buffers on the wire.
+    with _inference_lock:
+        outputs = _session.run(
+            None,
+            {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "token_type_ids": token_type_ids
+            }
+        )
 
     # Mean pooling over token embeddings
     token_embeddings = outputs[0]  # (batch, seq_len, hidden_dim)
@@ -212,7 +222,18 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 5175
-    server = HTTPServer(('127.0.0.1', port), Handler)
+    # Pre-load the ONNX model now so the first client request doesn't pay
+    # the 5-12s cold-start tax (and so concurrent first-callers don't all
+    # race the lazy-init code path).
+    print(f"[embed-server] Pre-loading model...", flush=True)
+    load_model()
+    # Warm the inference graph with a tiny dummy call
+    _ = embed_texts(["warmup"])
+    print(f"[embed-server] Model ready", flush=True)
+    # ThreadingHTTPServer so concurrent requests (broker classifier, vault
+    # bridge classifier, browser semantic synapse queries) don't block each
+    # other and stall the whole brain.
+    server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
     print(f"[embed-server] SYPHER Brain Embedding Server on http://127.0.0.1:{port}")
     print(f"[embed-server] Endpoints: POST /api/positions, POST /api/similarity, POST /api/embed, GET /api/health")
     server.serve_forever()

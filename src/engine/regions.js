@@ -3,14 +3,14 @@
  */
 
 export const BRAIN_REGIONS = [
-  { name: 'PREFRONTAL', center: [0, 0.3, 0.8], radius: 0.45, color: [1.0, 0.3, 0.2] },
-  { name: 'CONCEPT LAYER', center: [-0.5, 0.1, 0.2], radius: 0.5, color: [0.65, 0.55, 0.98] },
-  { name: 'CONTEXT CORTEX', center: [0.5, 0.1, 0.2], radius: 0.5, color: [0.2, 0.85, 0.85] },
+  { name: 'PREFRONTAL', center: [0, 0.4, 0.7], radius: 0.45, color: [1.0, 0.23, 0.19] },
+  { name: 'CONCEPT LAYER', center: [-0.3, 0.0, 0.2], radius: 0.5, color: [1.0, 0.58, 0.0] },
+  { name: 'SENSORY CORTEX', center: [0.7, 0.1, 0.1], radius: 0.45, color: [0.0, 0.9, 0.95] },
   { name: 'TEMPORAL', center: [-0.7, -0.3, -0.1], radius: 0.4, color: [1.0, 0.6, 0.1] },
   { name: 'PARIETAL', center: [0, 0.6, -0.2], radius: 0.4, color: [0.2, 0.8, 0.4] },
-  { name: 'OCCIPITAL', center: [0, -0.1, -0.7], radius: 0.4, color: [0.3, 0.6, 1.0] },
-  { name: 'HIPPOCAMPUS', center: [0, -0.4, 0.1], radius: 0.3, color: [0.95, 0.4, 0.7] },
-  { name: 'CEREBELLUM', center: [0, -0.7, -0.4], radius: 0.35, color: [0.5, 0.9, 0.3] },
+  { name: 'OCCIPITAL', center: [0, -0.1, -0.7], radius: 0.4, color: [0.5, 0.55, 0.97] },
+  { name: 'HIPPOCAMPUS', center: [-0.5, -0.5, 0.3], radius: 0.35, color: [0.30, 0.85, 0.39] },
+  { name: 'CEREBELLUM', center: [-0.8, 0.1, 0.0], radius: 0.4, color: [0.9, 0.2, 0.7] },
 ];
 
 const CATEGORY_TO_REGION = {
@@ -20,6 +20,7 @@ const CATEGORY_TO_REGION = {
   decision: 0,
   session: 6,
   entity: 2,
+  sensory: 2,
   synthesis: 5,
   default: 3,
 };

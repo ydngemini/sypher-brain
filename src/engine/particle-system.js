@@ -31,12 +31,22 @@ varying vec3 v_color;
 varying float v_glow;
 
 void main() {
-  vec2 uv = gl_PointCoord * 2.0 - 1.0;
-  float d = length(uv);
+  vec2 coord = gl_PointCoord - vec2(0.5);
 
-  float core = smoothstep(0.5, 0.0, d);
-  float halo = exp(-d * d * 8.0) * v_glow * 0.5;
-  float alpha = core + halo;
+  // Horizontal dash shape — width varies per particle for organic look
+  float dashWidth = 0.25 + fract(v_color.r * 12.345) * 0.2;
+  float dashHeight = 0.035 + v_glow * 0.015;
+
+  if (abs(coord.y) > dashHeight || abs(coord.x) > dashWidth) discard;
+
+  // Soft edges
+  float edgeX = smoothstep(dashWidth, dashWidth - 0.06, abs(coord.x));
+  float edgeY = smoothstep(dashHeight, dashHeight - 0.01, abs(coord.y));
+  float alpha = edgeX * edgeY;
+
+  // Glow halo around the dash
+  float halo = exp(-(coord.x * coord.x * 4.0 + coord.y * coord.y * 60.0)) * v_glow * 0.4;
+  alpha = max(alpha, halo);
 
   if (alpha < 0.02) discard;
 
@@ -48,7 +58,7 @@ void main() {
 `;
 
 export class ParticleSystem {
-  constructor(maxParticles = 8000) {
+  constructor(maxParticles = 1_000_000) {
     this.maxParticles = maxParticles;
     this.count = 0;
 
@@ -58,10 +68,20 @@ export class ParticleSystem {
     const glows = new Float32Array(maxParticles);
     const sizes = new Float32Array(maxParticles);
 
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute('a_color', new THREE.BufferAttribute(colors, 3));
-    geometry.setAttribute('a_glow', new THREE.BufferAttribute(glows, 1));
-    geometry.setAttribute('a_size', new THREE.BufferAttribute(sizes, 1));
+    const posAttr  = new THREE.BufferAttribute(positions, 3);
+    const colAttr  = new THREE.BufferAttribute(colors, 3);
+    const glowAttr = new THREE.BufferAttribute(glows, 1);
+    const sizeAttr = new THREE.BufferAttribute(sizes, 1);
+    // STATIC_DRAW would be wrong — we mutate frequently
+    posAttr.setUsage(THREE.DynamicDrawUsage);
+    colAttr.setUsage(THREE.DynamicDrawUsage);
+    glowAttr.setUsage(THREE.DynamicDrawUsage);
+    sizeAttr.setUsage(THREE.DynamicDrawUsage);
+
+    geometry.setAttribute('position', posAttr);
+    geometry.setAttribute('a_color', colAttr);
+    geometry.setAttribute('a_glow', glowAttr);
+    geometry.setAttribute('a_size', sizeAttr);
 
     const material = new THREE.ShaderMaterial({
       vertexShader: PARTICLE_VERTEX,
@@ -102,10 +122,59 @@ export class ParticleSystem {
     this.geometry.setDrawRange(0, this.count);
   }
 
+  // Append a batch of new particles. Only the changed portion of each buffer
+  // is uploaded to the GPU — critical for performance at 1M cap.
+  // Returns the start index for the appended block (caller may want it for
+  // later updateGlow / updateSize calls).
+  appendParticles(particles) {
+    if (this.count >= this.maxParticles) return -1;
+    const pos = this.geometry.attributes.position;
+    const col = this.geometry.attributes.a_color;
+    const glow = this.geometry.attributes.a_glow;
+    const size = this.geometry.attributes.a_size;
+
+    const startIndex = this.count;
+    const limit = Math.min(particles.length, this.maxParticles - startIndex);
+
+    for (let i = 0; i < limit; i++) {
+      const p = particles[i];
+      const idx = startIndex + i;
+      pos.setXYZ(idx, p.x, p.y, p.z);
+      col.setXYZ(idx, p.r, p.g, p.b);
+      glow.setX(idx, p.glow);
+      size.setX(idx, p.size);
+    }
+
+    this.count += limit;
+    // Mark only the appended range dirty (massive perf win at 1M cap)
+    if (pos.addUpdateRange) {
+      pos.addUpdateRange(startIndex * 3, limit * 3);
+      col.addUpdateRange(startIndex * 3, limit * 3);
+      glow.addUpdateRange(startIndex, limit);
+      size.addUpdateRange(startIndex, limit);
+    }
+    pos.needsUpdate = true;
+    col.needsUpdate = true;
+    glow.needsUpdate = true;
+    size.needsUpdate = true;
+    this.geometry.setDrawRange(0, this.count);
+    return startIndex;
+  }
+
   updateGlow(index, value) {
     if (index >= this.count) return;
-    this.geometry.attributes.a_glow.setX(index, value);
-    this.geometry.attributes.a_glow.needsUpdate = true;
+    const a = this.geometry.attributes.a_glow;
+    a.setX(index, value);
+    if (a.addUpdateRange) a.addUpdateRange(index, 1);
+    a.needsUpdate = true;
+  }
+
+  updateSize(index, value) {
+    if (index >= this.count) return;
+    const a = this.geometry.attributes.a_size;
+    a.setX(index, value);
+    if (a.addUpdateRange) a.addUpdateRange(index, 1);
+    a.needsUpdate = true;
   }
 
   update(time) {

@@ -39,7 +39,7 @@ void main() {
 `;
 
 export class SynapseNetwork {
-  constructor(maxEdges = 2000) {
+  constructor(maxEdges = 500_000) {
     this.maxEdges = maxEdges;
     this.edgeCount = 0;
 
@@ -48,10 +48,17 @@ export class SynapseNetwork {
     const activities = new Float32Array(maxVerts);
     const progresses = new Float32Array(maxVerts);
 
+    const posAttr = new THREE.BufferAttribute(positions, 3);
+    const actAttr = new THREE.BufferAttribute(activities, 1);
+    const progAttr = new THREE.BufferAttribute(progresses, 1);
+    posAttr.setUsage(THREE.DynamicDrawUsage);
+    actAttr.setUsage(THREE.DynamicDrawUsage);
+    progAttr.setUsage(THREE.DynamicDrawUsage);
+
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute('a_activity', new THREE.BufferAttribute(activities, 1));
-    geometry.setAttribute('a_progress', new THREE.BufferAttribute(progresses, 1));
+    geometry.setAttribute('position', posAttr);
+    geometry.setAttribute('a_activity', actAttr);
+    geometry.setAttribute('a_progress', progAttr);
 
     const material = new THREE.ShaderMaterial({
       vertexShader: SYNAPSE_VERTEX,
@@ -91,6 +98,46 @@ export class SynapseNetwork {
     act.needsUpdate = true;
     prog.needsUpdate = true;
     this.geometry.setDrawRange(0, this.edgeCount * 2);
+  }
+
+  // Append new edges to the existing buffer — only the new range is uploaded
+  // to the GPU, so growing the network doesn't re-transfer everything.
+  appendEdges(edges) {
+    if (!edges || edges.length === 0) return 0;
+    if (this.edgeCount >= this.maxEdges) return 0;
+
+    const pos = this.geometry.attributes.position;
+    const act = this.geometry.attributes.a_activity;
+    const prog = this.geometry.attributes.a_progress;
+
+    const startEdge = this.edgeCount;
+    const limit = Math.min(edges.length, this.maxEdges - startEdge);
+
+    for (let i = 0; i < limit; i++) {
+      const e = edges[i];
+      const idx = (startEdge + i) * 2;
+      pos.setXYZ(idx, e.from[0], e.from[1], e.from[2]);
+      pos.setXYZ(idx + 1, e.to[0], e.to[1], e.to[2]);
+      const a = e.activity ?? 0.5;
+      act.setX(idx, a);
+      act.setX(idx + 1, a);
+      prog.setX(idx, 0);
+      prog.setX(idx + 1, 1);
+    }
+
+    this.edgeCount += limit;
+    const vStart = startEdge * 2;
+    const vCount = limit * 2;
+    if (pos.addUpdateRange) {
+      pos.addUpdateRange(vStart * 3, vCount * 3);
+      act.addUpdateRange(vStart, vCount);
+      prog.addUpdateRange(vStart, vCount);
+    }
+    pos.needsUpdate = true;
+    act.needsUpdate = true;
+    prog.needsUpdate = true;
+    this.geometry.setDrawRange(0, this.edgeCount * 2);
+    return limit;
   }
 
   update(time) {

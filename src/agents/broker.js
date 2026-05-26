@@ -1,6 +1,10 @@
 import dgram from 'dgram';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
+import { readFile } from 'fs/promises';
+import { join, normalize } from 'path';
+
+const VAULT_PATH = process.env.VAULT_PATH || '/media/ydn/SYPHER_CORE/SYPHER_VAULT';
 
 const HTTP_PORT = 9800;
 const UDP_PORT = 3456;
@@ -8,14 +12,14 @@ const HEARTBEAT_INTERVAL = 30000;
 
 // Topological Adjacency Matrix — live weight space for neuromorphic routing
 const conceptWeights = {
-  PREFRONTAL:    { coordinates: [5.0, 2.0, 0.0],   baseColor: [1.0, 0.23, 0.19] },
-  CONCEPT_LAYER: { coordinates: [0.0, 4.0, 2.0],   baseColor: [1.0, 0.58, 0.0] },
-  CONTEXT_CORTEX:{ coordinates: [3.0, 1.0, 3.0],   baseColor: [0.13, 0.83, 0.83] },
-  TEMPORAL:      { coordinates: [-4.0, -1.0, 2.0],  baseColor: [1.0, 0.62, 0.04] },
-  PARIETAL:      { coordinates: [0.0, 5.0, -1.0],   baseColor: [0.2, 0.8, 0.4] },
-  OCCIPITAL:     { coordinates: [0.0, 0.0, -5.0],   baseColor: [0.5, 0.55, 0.97] },
-  HIPPOCAMPUS:   { coordinates: [-3.0, -2.0, 4.0],  baseColor: [0.30, 0.85, 0.39] },
-  CEREBELLUM:    { coordinates: [2.0, -5.0, -3.0],  baseColor: [0.35, 0.78, 0.98] },
+  PREFRONTAL:     { coordinates: [0.0, 0.4, 0.7],   baseColor: [1.0, 0.23, 0.19] },
+  CONCEPT_LAYER:  { coordinates: [-0.3, 0.0, 0.2],  baseColor: [1.0, 0.58, 0.0] },
+  SENSORY_CORTEX: { coordinates: [0.7, 0.1, 0.1],   baseColor: [0.0, 0.9, 0.95] },
+  TEMPORAL:       { coordinates: [-0.7, -0.3, -0.1], baseColor: [1.0, 0.6, 0.1] },
+  PARIETAL:       { coordinates: [0.0, 0.6, -0.2],   baseColor: [0.2, 0.8, 0.4] },
+  OCCIPITAL:      { coordinates: [0.0, -0.1, -0.7],  baseColor: [0.5, 0.55, 0.97] },
+  HIPPOCAMPUS:    { coordinates: [-0.5, -0.5, 0.3],  baseColor: [0.30, 0.85, 0.39] },
+  CEREBELLUM:     { coordinates: [-0.8, 0.1, 0.0],   baseColor: [0.9, 0.2, 0.7] },
 };
 
 // Command → agent/sector classification
@@ -35,7 +39,7 @@ function dissectCommandContext(cmd) {
   if (/^(grep|rg|find|fd|ag|ack|locate)$/.test(root))
     return { agentName: 'SEARCH_MATRIX', color: '#f59e0b', targetSector: 'TEMPORAL' };
   if (/^(curl|wget|ssh|scp|rsync|nc)$/.test(root))
-    return { agentName: 'NET_CONDUIT', color: '#22d3ee', targetSector: 'CONTEXT_CORTEX' };
+    return { agentName: 'NET_CONDUIT', color: '#22d3ee', targetSector: 'SENSORY_CORTEX' };
   if (/^(cat|less|head|tail|bat|jq|yq)$/.test(root))
     return { agentName: 'READ_STREAM', color: '#818cf8', targetSector: 'OCCIPITAL' };
   if (/^(cd|ls|ll|tree|pwd|mkdir|rm|mv|cp)$/.test(root))
@@ -50,6 +54,9 @@ const state = {
   feeds: [],
   clients: new Set(),
   telemetryCount: 0,
+  vaultNodes: new Map(),       // noteId -> persistent vault node
+  observations: new Map(),     // observation id -> latest observation
+  lastObservationId: 0,
 };
 
 function broadcast(msg) {
@@ -194,6 +201,132 @@ const httpServer = createServer((req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && req.url === '/api/vault-node') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const node = JSON.parse(body);
+        if (!node.id) throw new Error('vault node missing id');
+        state.vaultNodes.set(node.id, node);
+        broadcast({ type: 'VAULT_NODE', data: node });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/api/vault-delete') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const { id } = JSON.parse(body);
+        if (id && state.vaultNodes.delete(id)) {
+          broadcast({ type: 'VAULT_NODE_DELETE', data: { id } });
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/api/vault-nodes') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify([...state.vaultNodes.values()]));
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/api/vault-synapse') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      try {
+        const s = JSON.parse(body);
+        if (!s.sourceLabel || !s.targetLabel) throw new Error('sourceLabel + targetLabel required');
+        // Broadcast — vault-writer picks this up over WS and persists to .md
+        broadcast({ type: 'VAULT_SYNAPSE', data: s });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/api/agent-thought') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      try {
+        const t = JSON.parse(body);
+        if (!t.feedId || !t.agentId || !t.thought) throw new Error('feedId, agentId, thought required');
+        broadcast({ type: 'AGENT_THOUGHT', data: t });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && req.url.startsWith('/api/vault-content')) {
+    try {
+      const url = new URL(req.url, 'http://x');
+      const id = url.searchParams.get('id');
+      if (!id) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'id required' }));
+        return;
+      }
+      const node = state.vaultNodes.get(id);
+      if (!node || !node.file) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'not found' }));
+        return;
+      }
+      // Safety: resolve and confirm the path is inside VAULT_PATH
+      const absolute = normalize(join(VAULT_PATH, node.file));
+      if (!absolute.startsWith(normalize(VAULT_PATH) + '/')) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'path escape' }));
+        return;
+      }
+      readFile(absolute, 'utf-8')
+        .then(content => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ id, file: node.file, content }));
+        })
+        .catch(err => {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        });
+      return;
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+      return;
+    }
+  }
+
+  if (req.method === 'GET' && req.url.startsWith('/api/observations')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify([...state.observations.values()]));
+    return;
+  }
+
   res.writeHead(404);
   res.end('not found');
 });
@@ -210,6 +343,8 @@ wss.on('connection', (ws) => {
       agents: [...state.agents.values()],
       feeds: state.feeds.slice(-20),
       topology: conceptWeights,
+      vaultNodes: [...state.vaultNodes.values()],
+      observations: [...state.observations.values()].slice(-200),
     },
   }));
 
@@ -237,9 +372,125 @@ setInterval(() => {
   }
 }, HEARTBEAT_INTERVAL);
 
-httpServer.listen(HTTP_PORT, '127.0.0.1', () => {
+// --- Ambient neural activity generator ---
+// Continuously fires synthetic feeds so the brain is always alive with sprites
+const AMBIENT_AGENTS = [
+  { id: 'CORTEX_SCANNER', sector: 'PREFRONTAL', color: '#ff3b30', summaries: ['scanning decision trees', 'evaluating priority queue', 'prefrontal sweep active'] },
+  { id: 'KNOWLEDGE_WEAVER', sector: 'CONCEPT_LAYER', color: '#ff9500', summaries: ['linking concepts', 'embedding new relations', 'pattern synthesis'] },
+  { id: 'SENSORY_INTAKE', sector: 'SENSORY_CORTEX', color: '#00e5f0', summaries: ['processing input stream', 'signal normalization', 'sensory buffer flush'] },
+  { id: 'MEMORY_INDEXER', sector: 'HIPPOCAMPUS', color: '#4cd964', summaries: ['indexing episodic memory', 'consolidating traces', 'recall pathway active'] },
+  { id: 'MOTOR_PLANNER', sector: 'CEREBELLUM', color: '#e633b4', summaries: ['coordinating build pipeline', 'motor sequence queued', 'execution plan ready'] },
+  { id: 'TEMPORAL_SYNC', sector: 'TEMPORAL', color: '#f59e0b', summaries: ['temporal alignment', 'sequence prediction', 'chronology update'] },
+  { id: 'SPATIAL_MAP', sector: 'PARIETAL', color: '#34d399', summaries: ['mapping spatial relations', 'topology refresh', 'coordinate update'] },
+  { id: 'VISUAL_PROCESS', sector: 'OCCIPITAL', color: '#818cf8', summaries: ['visual cortex active', 'rendering pipeline', 'pattern recognition'] },
+];
+
+const AMBIENT_NODES = ['vault', 'obsidian', 'graph', 'memory', 'concept', 'project', 'session', 'decision', 'architecture', 'synthesis', 'discovery', 'entity'];
+
+function fireAmbientPulse() {
+  const agent = AMBIENT_AGENTS[Math.floor(Math.random() * AMBIENT_AGENTS.length)];
+  const summary = agent.summaries[Math.floor(Math.random() * agent.summaries.length)];
+  const srcNode = AMBIENT_NODES[Math.floor(Math.random() * AMBIENT_NODES.length)];
+  const tgtNode = AMBIENT_NODES[Math.floor(Math.random() * AMBIENT_NODES.length)];
+
+  const feed = {
+    agentId: agent.id,
+    targetSector: agent.sector,
+    intensity: 0.3 + Math.random() * 0.6,
+    synapticAssociations: [{
+      sourceNode: srcNode,
+      targetNode: tgtNode,
+      weight: 0.4 + Math.random() * 0.5,
+    }],
+    payloadSummary: summary,
+  };
+
+  handleNeuralFeed(feed);
+
+  broadcast({
+    type: 'SYNAPSE_ACTIVATION',
+    meta: { command: summary, directory: '/sypher', success: true },
+    agent: {
+      identifier: agent.id,
+      hexColor: agent.color,
+      targetSector: agent.sector,
+      vectorTarget: conceptWeights[agent.sector]?.coordinates || [0, 0, 0],
+    },
+    dynamics: { intensity: feed.intensity, timestamp: Date.now() },
+  });
+}
+
+// Fire ambient pulses every 2-5 seconds (randomized for organic feel)
+function scheduleNextPulse() {
+  const delay = 2000 + Math.random() * 3000;
+  setTimeout(() => {
+    if (state.clients.size > 0) fireAmbientPulse();
+    scheduleNextPulse();
+  }, delay);
+}
+scheduleNextPulse();
+
+// --- claude-mem observation tailer ---
+// Polls the claude-mem HTTP API every 1s, broadcasts OBSERVATION_NEW for any
+// observation whose id is greater than the highest we've seen.
+const CLAUDE_MEM_API = process.env.CLAUDE_MEM_API || 'http://127.0.0.1:37777';
+
+async function pollObservations() {
+  try {
+    const res = await fetch(`${CLAUDE_MEM_API}/api/observations?limit=50`, {
+      signal: AbortSignal.timeout(2500),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    const items = Array.isArray(data) ? data : data.items || data.observations || [];
+    if (!items.length) return;
+
+    // Items come newest-first; iterate oldest-first so order on the wire is sane.
+    const fresh = items
+      .filter(o => o && typeof o.id === 'number' && o.id > state.lastObservationId)
+      .sort((a, b) => a.id - b.id);
+
+    for (const obs of fresh) {
+      state.observations.set(obs.id, obs);
+      if (obs.id > state.lastObservationId) state.lastObservationId = obs.id;
+      broadcast({ type: 'OBSERVATION_NEW', data: obs });
+    }
+    if (fresh.length) {
+      console.log(`[broker] obs-tail: +${fresh.length} (latest id=${state.lastObservationId})`);
+    }
+  } catch (err) {
+    // Silent — claude-mem may be restarting
+  }
+}
+
+async function seedObservations() {
+  try {
+    const res = await fetch(`${CLAUDE_MEM_API}/api/observations?limit=200`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    const items = Array.isArray(data) ? data : data.items || data.observations || [];
+    for (const obs of items) {
+      if (obs && typeof obs.id === 'number') {
+        state.observations.set(obs.id, obs);
+        if (obs.id > state.lastObservationId) state.lastObservationId = obs.id;
+      }
+    }
+    console.log(`[broker] obs-seed: ${state.observations.size} observations (max id=${state.lastObservationId})`);
+  } catch {
+    console.log('[broker] obs-seed: claude-mem unreachable, will retry');
+  }
+}
+
+httpServer.listen(HTTP_PORT, '127.0.0.1', async () => {
   console.log(`[broker] SYPHER Brain Neuromorphic Broker`);
   console.log(`[broker] HTTP/WS: http://127.0.0.1:${HTTP_PORT}`);
   console.log(`[broker] UDP:     udp://127.0.0.1:${UDP_PORT}`);
   console.log(`[broker] Topology: ${Object.keys(conceptWeights).length} sectors active`);
+  console.log(`[broker] Ambient: auto-pulse active (2-5s interval when clients connected)`);
+  console.log(`[broker] Tailer:  polling ${CLAUDE_MEM_API}/api/observations every 1s`);
+
+  await seedObservations();
+  setInterval(pollObservations, 1000);
 });

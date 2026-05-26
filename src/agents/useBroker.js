@@ -10,7 +10,11 @@ export function useBroker() {
   const [connected, setConnected] = useState(false);
   const feedCallbackRef = useRef(null);
   const synapseCallbackRef = useRef(null);
-  const mutationCallbackRef = useRef(null);
+  const initCallbackRef = useRef(null);
+  const vaultNodeCallbackRef = useRef(null);
+  const vaultDeleteCallbackRef = useRef(null);
+  const observationCallbackRef = useRef(null);
+  const thoughtCallbackRef = useRef(null);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -31,6 +35,7 @@ export function useBroker() {
         if (msg.type === 'INIT') {
           setAgents(msg.data.agents || []);
           setFeeds(msg.data.feeds || []);
+          if (initCallbackRef.current) initCallbackRef.current(msg.data);
         } else if (msg.type === 'NEURAL_FEED') {
           setFeeds(prev => [...prev.slice(-49), msg.data]);
           if (feedCallbackRef.current) feedCallbackRef.current(msg.data);
@@ -46,6 +51,14 @@ export function useBroker() {
             }
             return [...prev, msg.data];
           });
+        } else if (msg.type === 'VAULT_NODE') {
+          if (vaultNodeCallbackRef.current) vaultNodeCallbackRef.current(msg.data);
+        } else if (msg.type === 'VAULT_NODE_DELETE') {
+          if (vaultDeleteCallbackRef.current) vaultDeleteCallbackRef.current(msg.data);
+        } else if (msg.type === 'OBSERVATION_NEW') {
+          if (observationCallbackRef.current) observationCallbackRef.current(msg.data);
+        } else if (msg.type === 'AGENT_THOUGHT') {
+          if (thoughtCallbackRef.current) thoughtCallbackRef.current(msg.data);
         }
       } catch {}
     };
@@ -58,13 +71,13 @@ export function useBroker() {
     };
   }, [connect]);
 
-  const onFeed = useCallback((cb) => {
-    feedCallbackRef.current = cb;
-  }, []);
-
-  const onSynapse = useCallback((cb) => {
-    synapseCallbackRef.current = cb;
-  }, []);
+  const onFeed = useCallback((cb) => { feedCallbackRef.current = cb; }, []);
+  const onSynapse = useCallback((cb) => { synapseCallbackRef.current = cb; }, []);
+  const onInit = useCallback((cb) => { initCallbackRef.current = cb; }, []);
+  const onVaultNode = useCallback((cb) => { vaultNodeCallbackRef.current = cb; }, []);
+  const onVaultDelete = useCallback((cb) => { vaultDeleteCallbackRef.current = cb; }, []);
+  const onObservation = useCallback((cb) => { observationCallbackRef.current = cb; }, []);
+  const onThought = useCallback((cb) => { thoughtCallbackRef.current = cb; }, []);
 
   const sendFeed = useCallback(async (feed) => {
     try {
@@ -76,5 +89,17 @@ export function useBroker() {
     } catch {}
   }, []);
 
-  return { agents, feeds, connected, onFeed, onSynapse, sendFeed };
+  return {
+    agents,
+    feeds,
+    connected,
+    onFeed,
+    onSynapse,
+    onInit,
+    onVaultNode,
+    onVaultDelete,
+    onObservation,
+    onThought,
+    sendFeed,
+  };
 }
